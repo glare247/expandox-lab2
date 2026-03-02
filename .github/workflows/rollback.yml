@@ -1,0 +1,63 @@
+name: 🔄 Rollback Deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to rollback'
+        required: true
+        type: choice
+        options:
+          - dev
+          - production
+      image_tag:
+        description: 'Image tag to rollback to (git SHA or "previous")'
+        required: true
+        default: 'previous'
+
+jobs:
+  rollback:
+    name: 🔄 Rollback ${{ github.event.inputs.environment }}
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment == 'production' && 'production' || 'dev' }}
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GIT_PAT }}
+          fetch-depth: 10
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Get GKE credentials
+        run: |
+          gcloud container clusters get-credentials ${{ secrets.GKE_CLUSTER_NAME }} \
+            --zone ${{ secrets.GKE_CLUSTER_ZONE }} \
+            --project ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Perform Kubernetes rollback
+        run: |
+          NAMESPACE="mini-finance-${{ github.event.inputs.environment }}"
+          if [ "${{ github.event.inputs.image_tag }}" == "previous" ]; then
+            echo "⏪ Rolling back to previous deployment..."
+            kubectl rollout undo deployment/mini-finance-app -n $NAMESPACE
+          else
+            echo "⏪ Rolling back to image: ${{ github.event.inputs.image_tag }}"
+            kubectl set image deployment/mini-finance-app \
+              mini-finance-app=glare247/mini-finance-app:${{ github.event.inputs.image_tag }} \
+              -n $NAMESPACE
+          fi
+
+      - name: Verify rollback health
+        run: |
+          NAMESPACE="mini-finance-${{ github.event.inputs.environment }}"
+          kubectl rollout status deployment/mini-finance-app \
+            -n $NAMESPACE --timeout=120s
+          kubectl get pods -n $NAMESPACE

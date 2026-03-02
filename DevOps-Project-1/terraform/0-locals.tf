@@ -1,5 +1,5 @@
 locals {
-  project_id = "expandox-project1"
+  project_id = "testing1-488517"
   region     = "us-central1"
   apis = [
     "compute.googleapis.com",

@@ -1,99 +1,160 @@
-name: CI - Build, Scan, Push, Update Manifests
+name: CI Pipeline - Build, Scan & Push
 
 on:
-    push:
-        branches:
-            - "**"
-        paths:
-            - "DevOps-Project-1/mini-finance-app/**"
-            - "DevOps-Project-1/k8s/**"
-            - ".github/workflows/ci.yml"
-    pull_request:
-        paths-ignore:
-            - "DevOps-Project-1/mini-finance-app/*.md"
-            - "DevOps-Project-1/mini-finance-app/docs/**"
+  push:
+    branches: [ main, develop, 'feature/**' ]
+  pull_request:
+    branches: [ main, develop ]
 
-permissions:
-    contents: write
+env:
+  DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+  IMAGE_NAME: glare247/mini-finance-app
 
 jobs:
-    build_scan_and_deploy:
-        runs-on: ubuntu-latest
-        name: Build, Scan, and Deploy
-        #  Note: Ensure you have an environment named 'production' in your GitHub repo settings
-        environment: production
+  # ─────────────────────────────────────────
+  # JOB 1: Lint & Basic Checks
+  # ─────────────────────────────────────────
+  lint:
+    name: 🔍 Lint & Validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-        steps:
-            # 1️⃣ Checkout code
-            - name: Checkout code
-              uses: actions/checkout@v4
-              with:
-                  fetch-depth: 0
+      - name: Validate Dockerfile
+        run: |
+          docker run --rm -i hadolint/hadolint < mini-finance-app/Dockerfile || true
 
-            # 2️⃣ Setup Docker Buildx
-            - name: Setup Docker Buildx
-              uses: docker/setup-buildx-action@v3
+      - name: Validate K8s manifests
+        run: |
+          curl -LO https://storage.googleapis.com/kubernetes-release/release/$(curl -s https://storage.googleapis.com/kubernetes-release/release/stable.txt)/bin/linux/amd64/kubectl
+          chmod +x kubectl
+          ./kubectl apply --dry-run=client -f k8s/dev/manifests.yaml || true
+          ./kubectl apply --dry-run=client -f k8s/production/manifests.yaml || true
 
-            # 3️⃣ Login Docker
-            - name: Login to Docker Hub
-              if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
-              uses: docker/login-action@v3
-              with:
-                  username: ${{ secrets.DOCKER_USERNAME }}
-                  password: ${{ secrets.DOCKERHUB_TOKEN }}
+  # ─────────────────────────────────────────
+  # JOB 2: Build Docker Image
+  # ─────────────────────────────────────────
+  build:
+    name: 🏗️ Build Docker Image
+    runs-on: ubuntu-latest
+    needs: lint
+    outputs:
+      image_tag: ${{ steps.meta.outputs.image_tag }}
 
-            # 4️⃣ Build Docker Image
-            - name: Build Docker Image
-              id: docker_build
-              run: |
-                  IMAGE_TAG=lakunzy/mini-finance-app:${{ github.sha }}
-                  docker build -t $IMAGE_TAG ./DevOps-Project-1/mini-finance-app
-                  echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-            # 5️⃣ Scan with Trivy (v0.33.1 as per official docs)
-            - name: Scan Docker Image
-              uses: aquasecurity/trivy-action@0.33.1
-              with:
-                  image-ref: ${{ env.IMAGE_TAG }}
-                  format: "table"
-                  exit-code: 1
-                  severity: "CRITICAL,HIGH"
+      - name: Set image tag
+        id: meta
+        run: |
+          IMAGE_TAG=${{ github.sha }}
+          echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+          echo "Image tag: $IMAGE_TAG"
 
-            # 6️⃣ Push Docker Image
-            - name: Push Docker Image
-              if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
-              run: |
-                  docker push ${{ env.IMAGE_TAG }}
-                  docker tag ${{ env.IMAGE_TAG }} lakunzy/mini-finance-app:latest
-                  docker push lakunzy/mini-finance-app:latest
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-            # 7️⃣ Update Dev Manifest
-            - name: Update Dev Manifest
-              if: github.ref == 'refs/heads/develop'
-              env:
-                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-              run: |
-                  git config --global user.name 'github-actions[bot]'
-                  git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-                  # Matches the specific manifests.yaml found in your tree
-                  sed -i "s|image: lakunzy/mini-finance-app:.*|image: ${{ env.IMAGE_TAG }}|g" DevOps-Project-1/k8s/dev/manifests.yaml
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./mini-finance-app
+          push: false                          # Don't push yet — scan first
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+            ${{ env.IMAGE_NAME }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          load: true                           # Load into local Docker daemon for scanning
 
-                  git add DevOps-Project-1/k8s/dev/manifests.yaml
-                  git commit -m "ci: update dev image tag to ${{ github.sha }}" || echo "No changes to commit"
-                  git push origin develop
+  # ─────────────────────────────────────────
+  # JOB 3: Security Scan with Trivy
+  # ─────────────────────────────────────────
+  security-scan:
+    name: 🔐 Security Scan (Trivy)
+    runs-on: ubuntu-latest
+    needs: build
 
-            # 8️⃣ Update Prod Manifest (Only runs if main branch exists)
-            - name: Update Prod Manifest
-              if: github.ref == 'refs/heads/main'
-              env:
-                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-              run: |
-                  git config --global user.name 'github-actions[bot]'
-                  git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-                  sed -i "s|image: lakunzy/mini-finance-app:.*|image: ${{ env.IMAGE_TAG }}|g" DevOps-Project-1/k8s/production/manifests.yaml
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-                  git add DevOps-Project-1/k8s/production/manifests.yaml
-                  git commit -m "ci: update prod image tag to ${{ github.sha }}" || echo "No changes to commit"
-                  git push origin main
+      - name: Build image locally for scanning
+        uses: docker/build-push-action@v5
+        with:
+          context: ./mini-finance-app
+          push: false
+          load: true
+          tags: ${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+      - name: Run Trivy vulnerability scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: '${{ env.IMAGE_NAME }}:${{ github.sha }}'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'                       # ❌ Fails pipeline on CRITICAL/HIGH vulns
+
+      - name: Upload Trivy results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()                           # Upload even if scan fails
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      - name: Trivy scan summary (table view)
+        uses: aquasecurity/trivy-action@master
+        if: always()
+        with:
+          image-ref: '${{ env.IMAGE_NAME }}:${{ github.sha }}'
+          format: 'table'
+          severity: 'CRITICAL,HIGH,MEDIUM'
+          exit-code: '0'                       # Just for display, don't fail again
+
+  # ─────────────────────────────────────────
+  # JOB 4: Push to Docker Hub
+  # ─────────────────────────────────────────
+  push:
+    name: 📦 Push to Docker Hub
+    runs-on: ubuntu-latest
+    needs: security-scan                       # Only push if scan passes
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and Push to Docker Hub
+        uses: docker/build-push-action@v5
+        with:
+          context: ./mini-finance-app
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+            ${{ env.IMAGE_NAME }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Image digest summary
+        run: |
+          echo "✅ Image pushed successfully!"
+          echo "📦 Image: ${{ env.IMAGE_NAME }}:${{ github.sha }}"
+          echo "🔗 Docker Hub: https://hub.docker.com/r/glare247/mini-finance-app"
