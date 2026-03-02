@@ -23,14 +23,14 @@ jobs:
 
       - name: Validate Dockerfile
         run: |
-          docker run --rm -i hadolint/hadolint < mini-finance-app/Dockerfile || true
+          docker run --rm -i hadolint/hadolint < DevOps-Project-1/mini-finance-app/Dockerfile || true
 
       - name: Validate K8s manifests
         run: |
           curl -LO https://storage.googleapis.com/kubernetes-release/release/$(curl -s https://storage.googleapis.com/kubernetes-release/release/stable.txt)/bin/linux/amd64/kubectl
           chmod +x kubectl
-          ./kubectl apply --dry-run=client -f k8s/dev/manifests.yaml || true
-          ./kubectl apply --dry-run=client -f k8s/production/manifests.yaml || true
+          ./kubectl apply --dry-run=client -f DevOps-Project-1/k8s/dev/manifests.yaml || true
+          ./kubectl apply --dry-run=client -f DevOps-Project-1/k8s/production/manifests.yaml || true
 
   # ─────────────────────────────────────────
   # JOB 2: Build Docker Image
@@ -65,7 +65,7 @@ jobs:
       - name: Build Docker image
         uses: docker/build-push-action@v5
         with:
-          context: ./mini-finance-app
+          context: ./DevOps-Project-1/mini-finance-app
           push: false                          # Don't push yet — scan first
           tags: |
             ${{ env.IMAGE_NAME }}:${{ github.sha }}
@@ -92,7 +92,7 @@ jobs:
       - name: Build image locally for scanning
         uses: docker/build-push-action@v5
         with:
-          context: ./mini-finance-app
+          context: ./DevOps-Project-1/mini-finance-app
           push: false
           load: true
           tags: ${{ env.IMAGE_NAME }}:${{ github.sha }}
@@ -145,7 +145,7 @@ jobs:
       - name: Build and Push to Docker Hub
         uses: docker/build-push-action@v5
         with:
-          context: ./mini-finance-app
+          context: ./DevOps-Project-1/mini-finance-app
           push: true
           tags: |
             ${{ env.IMAGE_NAME }}:${{ github.sha }}
