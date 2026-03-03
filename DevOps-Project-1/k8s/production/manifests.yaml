@@ -24,7 +24,7 @@ metadata:
         app: mini-finance-app
         env: production
 spec:
-    replicas: 3
+    replicas: 1
     selector:
         matchLabels:
             app: mini-finance-app
